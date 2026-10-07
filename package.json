@@ -1,0 +1,49 @@
+{
+  "name": "hivemind-ai",
+  "version": "0.1.0",
+  "description": "Autonomous AI Company Builder - spawn AI agents to run your company's digital presence",
+  "type": "module",
+  "bin": {
+    "hivemind": "./dist/bin/hivemind.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/bin/hivemind.js",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "automation",
+    "company",
+    "cli"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@inquirer/prompts": "^7.0.0",
+    "@notionhq/client": "^5.27.0",
+    "better-sqlite3": "^11.0.0",
+    "chalk": "^5.3.0",
+    "commander": "^12.0.0",
+    "drizzle-orm": "^0.38.0",
+    "ink": "^5.1.0",
+    "node-cron": "^3.0.3",
+    "openai": "^4.0.0",
+    "ora": "^8.0.0",
+    "pino": "^9.0.0",
+    "pino-pretty": "^13.0.0",
+    "react": "^18.3.0",
+    "stripe": "^17.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^22.0.0",
+    "@types/node-cron": "^3.0.0",
+    "@types/react": "^18.3.0",
+    "drizzle-kit": "^0.30.0",
+    "typescript": "^5.6.0"
+  }
+}
