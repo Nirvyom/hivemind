@@ -1,10 +1,10 @@
 import { getSqlite } from '../db/index.js';
-import { callLLM, recordLLMCost, type LLMMessage, type LLMResponse } from '../llm/index.js';
+import { callLLM, callLLMWithFallback, recordLLMCost, type LLMMessage, type LLMResponse } from '../llm/index.js';
 import type { HivemindConfig } from '../config/schema.js';
 import { getAgentLogger } from '../utils/logger.js';
 import type pino from 'pino';
 
-export type AgentName = 'ceo' | 'content' | 'social' | 'sales' | 'client' | 'ops';
+export type AgentName = 'ceo' | 'content' | 'social' | 'sales' | 'client' | 'ops' | 'hr' | 'finance' | 'legal' | 'billing' | 'procurement' | 'analytics' | 'email_campaign' | 'support' | 'competitor' | 'pipeline' | 'engagement' | 'collections' | 'briefing';
 
 export interface AgentMessage {
   id: number;
@@ -40,6 +40,7 @@ export abstract class BaseAgent {
     this.runId = Number(result.lastInsertRowid);
 
     this.log.info({ runId: this.runId }, `${this.displayName} tick started`);
+    this.audit('tick_start', 'agent_run', this.runId, { startedAt });
 
     try {
       // Read pending messages
@@ -54,6 +55,7 @@ export abstract class BaseAgent {
         WHERE id = ?
       `).run(this.runId);
 
+      this.audit('tick_complete', 'agent_run', this.runId, { status: 'completed' });
       this.log.info({ runId: this.runId }, `${this.displayName} tick completed`);
     } catch (error: any) {
       db.prepare(`
@@ -61,11 +63,37 @@ export abstract class BaseAgent {
         WHERE id = ?
       `).run(error.message, this.runId);
 
+      this.audit('tick_fail', 'agent_run', this.runId, { error: error.message });
       this.log.error({ err: error, runId: this.runId }, `${this.displayName} tick failed`);
     }
   }
 
   protected abstract execute(messages: AgentMessage[]): Promise<void>;
+
+  protected audit(
+    action: string,
+    entityType: string,
+    entityId: number | string | null,
+    details: Record<string, any> = {},
+    cost: number = 0
+  ): void {
+    try {
+      const db = getSqlite();
+      db.prepare(`
+        INSERT INTO audit_log (timestamp, agent, action, entity_type, entity_id, details, cost)
+        VALUES (datetime('now'), ?, ?, ?, ?, ?, ?)
+      `).run(
+        this.name,
+        action,
+        entityType,
+        entityId != null ? String(entityId) : null,
+        JSON.stringify(details),
+        cost
+      );
+    } catch {
+      // Audit logging should never break agent execution
+    }
+  }
 
   protected async askLLM(
     systemPrompt: string,
@@ -77,13 +105,23 @@ export abstract class BaseAgent {
       { role: 'user', content: userPrompt },
     ];
 
-    const response = await callLLM(this.config.llm, messages, options);
+    const fallbacks = this.config.llmFallbacks || [];
+    const response = fallbacks.length > 0
+      ? await callLLMWithFallback(this.config.llm, fallbacks, messages, options)
+      : await callLLM(this.config.llm, messages, options);
 
     // Track cost
     if (response.cost > 0) {
       recordLLMCost(response.cost, `${this.displayName} agent call`);
       this.updateRunCost(response.tokensUsed.input + response.tokensUsed.output, response.cost);
     }
+
+    this.audit('llm_call', 'llm', null, {
+      model: this.config.llm.model,
+      tokensInput: response.tokensUsed.input,
+      tokensOutput: response.tokensUsed.output,
+      provider: (response as any).provider || this.config.llm.provider,
+    }, response.cost);
 
     return response;
   }
@@ -95,10 +133,14 @@ export abstract class BaseAgent {
     priority: number = 0
   ): void {
     const db = getSqlite();
-    db.prepare(`
+    const result = db.prepare(`
       INSERT INTO messages (from_agent, to_agent, type, payload, priority, created_at)
       VALUES (?, ?, ?, ?, ?, datetime('now'))
     `).run(this.name, toAgent, type, JSON.stringify(payload), priority);
+
+    this.audit('send_message', 'message', Number(result.lastInsertRowid), {
+      toAgent, type, priority,
+    });
 
     this.log.info({ toAgent, type }, 'Message sent');
   }

@@ -13,6 +13,7 @@ export interface LLMResponse {
   content: string;
   tokensUsed: { input: number; output: number };
   cost: number;
+  provider?: string;
 }
 
 // Cost per 1K tokens (approximate)
@@ -28,6 +29,66 @@ const COST_TABLE: Record<string, { input: number; output: number }> = {
 function estimateCost(model: string, input: number, output: number): number {
   const rates = COST_TABLE[model] || { input: 0.001, output: 0.002 };
   return (input / 1000) * rates.input + (output / 1000) * rates.output;
+}
+
+// Track provider health for fallback decisions
+const providerHealth: Map<string, { consecutiveFailures: number; lastFailure: number }> = new Map();
+
+function getProviderKey(provider: LLMProvider): string {
+  return `${provider.provider}:${provider.model}`;
+}
+
+function isProviderHealthy(provider: LLMProvider): boolean {
+  const key = getProviderKey(provider);
+  const health = providerHealth.get(key);
+  if (!health) return true;
+  // Skip providers with 3+ consecutive failures in the last 5 minutes
+  if (health.consecutiveFailures >= 3 && Date.now() - health.lastFailure < 5 * 60 * 1000) {
+    return false;
+  }
+  return true;
+}
+
+function recordProviderSuccess(provider: LLMProvider): void {
+  const key = getProviderKey(provider);
+  providerHealth.set(key, { consecutiveFailures: 0, lastFailure: 0 });
+}
+
+function recordProviderFailure(provider: LLMProvider): void {
+  const key = getProviderKey(provider);
+  const current = providerHealth.get(key) || { consecutiveFailures: 0, lastFailure: 0 };
+  providerHealth.set(key, {
+    consecutiveFailures: current.consecutiveFailures + 1,
+    lastFailure: Date.now(),
+  });
+}
+
+export async function callLLMWithFallback(
+  primary: LLMProvider,
+  fallbacks: LLMProvider[],
+  messages: LLMMessage[],
+  options: { temperature?: number; maxTokens?: number; json?: boolean } = {}
+): Promise<LLMResponse> {
+  const allProviders = [primary, ...fallbacks];
+
+  for (const provider of allProviders) {
+    if (!isProviderHealthy(provider)) {
+      log.warn({ provider: getProviderKey(provider) }, 'Skipping unhealthy provider');
+      continue;
+    }
+
+    try {
+      const response = await callLLM(provider, messages, options);
+      recordProviderSuccess(provider);
+      response.provider = provider.provider;
+      return response;
+    } catch (err: any) {
+      recordProviderFailure(provider);
+      log.error({ err, provider: getProviderKey(provider) }, 'LLM provider failed, trying fallback');
+    }
+  }
+
+  throw new Error('All LLM providers failed');
 }
 
 export async function callLLM(

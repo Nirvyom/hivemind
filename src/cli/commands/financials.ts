@@ -114,6 +114,78 @@ export async function financialsCommand(): Promise<void> {
     }
   }
 
+  // Invoices & Billing
+  const invoiceStats = db.prepare(`
+    SELECT status, COUNT(*) as count, COALESCE(SUM(total_amount), 0) as total
+    FROM invoices GROUP BY status ORDER BY total DESC
+  `).all() as any[];
+
+  if (invoiceStats.length > 0) {
+    console.log(chalk.bold('\n  Invoices'));
+    for (const stat of invoiceStats) {
+      const color = stat.status === 'paid' ? chalk.green : stat.status === 'overdue' ? chalk.red : chalk.yellow;
+      console.log(`  ${stat.status.padEnd(15)} ${String(stat.count).padEnd(5)} ${color(`$${stat.total.toFixed(2)}`)}`);
+    }
+  }
+
+  // MRR (Monthly Recurring Revenue)
+  const mrr = (db.prepare(
+    "SELECT COALESCE(SUM(amount), 0) as total FROM subscriptions WHERE status = 'active' AND billing_cycle = 'monthly'"
+  ).get() as any).total;
+  const arr = mrr * 12;
+  if (mrr > 0) {
+    console.log(chalk.bold('\n  Recurring Revenue'));
+    console.log(`  MRR:         ${chalk.green(`$${mrr.toFixed(2)}`)}`);
+    console.log(`  ARR:         ${chalk.green(`$${arr.toFixed(2)}`)}`);
+  }
+
+  // Budget by Department
+  const currentPeriod = new Date().toISOString().slice(0, 7);
+  const budgetByDept = db.prepare(`
+    SELECT department, allocated_amount, spent_amount
+    FROM budgets WHERE period = ? ORDER BY allocated_amount DESC
+  `).all(currentPeriod) as any[];
+
+  if (budgetByDept.length > 0) {
+    console.log(chalk.bold('\n  Budget by Department'));
+    for (const dept of budgetByDept) {
+      const pct = dept.allocated_amount > 0 ? ((dept.spent_amount / dept.allocated_amount) * 100).toFixed(0) : '0';
+      const color = Number(pct) > 90 ? chalk.red : Number(pct) > 70 ? chalk.yellow : chalk.green;
+      console.log(`  ${dept.department.padEnd(20)} ${color(`$${dept.spent_amount.toFixed(2)}`)} / $${dept.allocated_amount.toFixed(2)} (${pct}%)`);
+    }
+  }
+
+  // Churn Signals
+  const churnSignals = db.prepare(`
+    SELECT cs.*, c.name as client_name
+    FROM churn_signals cs
+    JOIN clients c ON cs.client_id = c.id
+    WHERE cs.resolved_at IS NULL
+    ORDER BY cs.severity DESC
+    LIMIT 10
+  `).all() as any[];
+
+  if (churnSignals.length > 0) {
+    console.log(chalk.bold('\n  Churn Alerts'));
+    for (const signal of churnSignals) {
+      const severityColor = signal.severity >= 4 ? chalk.red : signal.severity >= 3 ? chalk.yellow : chalk.dim;
+      console.log(`  ${severityColor(`P${signal.severity}`)} ${(signal.client_name || 'Unknown').padEnd(20)} ${signal.signal_type.padEnd(20)} ${chalk.dim(signal.details || '')}`);
+    }
+  }
+
+  // Latest Board Report
+  const boardReport = db.prepare(
+    "SELECT data, period, created_at FROM financial_reports WHERE type = 'board_report' ORDER BY created_at DESC LIMIT 1"
+  ).get() as any;
+
+  if (boardReport) {
+    const data = JSON.parse(boardReport.data);
+    console.log(chalk.bold(`\n  Latest Board Report (${boardReport.period})`));
+    const narrative = data.narrative || '';
+    // Show first 500 chars
+    console.log(`  ${chalk.dim(narrative.slice(0, 500))}${narrative.length > 500 ? '...' : ''}`);
+  }
+
   // Recent transactions
   if (recent.length > 0) {
     console.log(chalk.bold('\n  Recent Transactions'));

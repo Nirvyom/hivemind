@@ -80,6 +80,84 @@ export class TelegramClient implements PlatformClient {
     if (!data.ok) return [];
     return data.result || [];
   }
+
+  async sendApprovalMessage(chatId: string, text: string, approvalId: number): Promise<number | null> {
+    const res = await fetch(`${this.baseUrl}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '\u2705 Approve', callback_data: `approve:${approvalId}` },
+            { text: '\u274c Reject', callback_data: `reject:${approvalId}` },
+          ]],
+        },
+      }),
+    });
+
+    const data = await res.json();
+    if (!data.ok) {
+      // Retry without HTML parse mode
+      const retryRes = await fetch(`${this.baseUrl}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: text.replace(/<[^>]*>/g, ''),
+          reply_markup: {
+            inline_keyboard: [[
+              { text: '\u2705 Approve', callback_data: `approve:${approvalId}` },
+              { text: '\u274c Reject', callback_data: `reject:${approvalId}` },
+            ]],
+          },
+        }),
+      });
+      const retryData = await retryRes.json();
+      return retryData.result?.message_id || null;
+    }
+
+    return data.result?.message_id || null;
+  }
+
+  async answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
+    await fetch(`${this.baseUrl}/answerCallbackQuery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        callback_query_id: callbackQueryId,
+        text: text || 'Done',
+      }),
+    });
+  }
+
+  async editMessageReplyMarkup(chatId: string, messageId: number, replyMarkup?: any): Promise<void> {
+    await fetch(`${this.baseUrl}/editMessageReplyMarkup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: replyMarkup || { inline_keyboard: [] },
+      }),
+    });
+  }
+
+  async editMessageText(chatId: string, messageId: number, text: string, replyMarkup?: any): Promise<void> {
+    await fetch(`${this.baseUrl}/editMessageText`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        message_id: messageId,
+        text,
+        parse_mode: 'HTML',
+        ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+      }),
+    });
+  }
 }
 
 function escapeMarkdown(text: string): string {

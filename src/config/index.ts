@@ -32,12 +32,36 @@ export function configExists(): boolean {
   return fs.existsSync(CONFIG_FILE);
 }
 
+// Shared mutable config reference for hot reload
+let _currentConfig: HivemindConfig | null = null;
+
 export function loadConfig(): HivemindConfig {
   if (!fs.existsSync(CONFIG_FILE)) {
     throw new Error('Hivemind not initialized. Run `hivemind init` first.');
   }
   const raw = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
-  return HivemindConfigSchema.parse(raw);
+  _currentConfig = HivemindConfigSchema.parse(raw);
+  return _currentConfig;
+}
+
+export function reloadConfig(): HivemindConfig | null {
+  try {
+    const raw = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
+    const newConfig = HivemindConfigSchema.parse(raw);
+    if (_currentConfig) {
+      // Update the existing config object in-place so all references stay valid
+      Object.assign(_currentConfig, newConfig);
+    } else {
+      _currentConfig = newConfig;
+    }
+    return _currentConfig;
+  } catch {
+    return null;
+  }
+}
+
+export function getCurrentConfig(): HivemindConfig | null {
+  return _currentConfig;
 }
 
 export function saveConfig(config: HivemindConfig): void {

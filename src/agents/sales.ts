@@ -21,6 +21,9 @@ export class SalesAgent extends BaseAgent {
     // Autonomous: follow up on existing leads
     await this.followUpLeads();
 
+    // Analyze upsell opportunities
+    await this.analyzeUpsellOpportunities();
+
     // Report to CEO
     const stats = this.getLeadStats();
     this.sendMessage('ceo', 'report', { agent: 'sales', stats });
@@ -216,6 +219,102 @@ Return JSON:
         UPDATE leads SET updated_at = datetime('now') WHERE id = ?
       `).run(lead.id);
     }
+  }
+
+  async analyzeUpsellOpportunities(): Promise<void> {
+    const db = getSqlite();
+
+    // Find active subscriptions on lower tiers or nearing usage limits
+    const activeSubscriptions = db.prepare(`
+      SELECT s.*, c.name as client_name, c.email as client_email, c.id as client_id
+      FROM subscriptions s
+      JOIN clients c ON s.client_id = c.id
+      WHERE s.status = 'active'
+      ORDER BY s.amount ASC
+    `).all() as any[];
+
+    if (activeSubscriptions.length === 0) return;
+
+    const productCatalog = this.getProductCatalogContext();
+
+    try {
+      const response = await this.askLLM(
+        `You are a sales analyst for ${this.config.company.name}. Analyze subscriptions and recommend upsell opportunities. Output valid JSON.`,
+        `Current active subscriptions:
+${activeSubscriptions.map(s => `- ${s.client_name}: ${s.product_name} (${s.tier_name || 'default'}) at $${s.amount}/${s.billing_cycle}`).join('\n')}
+
+Product catalog:
+${productCatalog}
+
+Return JSON:
+{
+  "opportunities": [
+    {
+      "clientName": "name",
+      "clientId": 0,
+      "currentProduct": "current",
+      "currentAmount": 0,
+      "suggestedUpgrade": "product/tier name",
+      "suggestedAmount": 0,
+      "reason": "why this client would benefit",
+      "confidence": "high|medium|low"
+    }
+  ]
+}`,
+        { json: true }
+      );
+
+      let data: any;
+      try {
+        data = JSON.parse(response.content);
+      } catch {
+        return;
+      }
+
+      for (const opp of data.opportunities || []) {
+        if (opp.confidence === 'high' || opp.confidence === 'medium') {
+          this.sendMessage('client', 'task', {
+            type: 'upsell_outreach',
+            clientId: opp.clientId,
+            clientName: opp.clientName,
+            currentProduct: opp.currentProduct,
+            suggestedUpgrade: opp.suggestedUpgrade,
+            reason: opp.reason,
+          });
+        }
+      }
+
+      this.log.info({ opportunities: data.opportunities?.length || 0 }, 'Upsell opportunities analyzed');
+    } catch (err: any) {
+      this.log.error({ err }, 'Failed to analyze upsell opportunities');
+    }
+  }
+
+  createLeadWithReferral(
+    leadData: { name: string; email?: string; company?: string; source: string },
+    referrerClientId: number
+  ): void {
+    const db = getSqlite();
+
+    const result = db.prepare(`
+      INSERT INTO leads (name, email, company, source, status, score, notes, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'new', 60, ?, datetime('now'), datetime('now'))
+    `).run(
+      leadData.name,
+      leadData.email || null,
+      leadData.company || null,
+      leadData.source || 'referral',
+      JSON.stringify({ referredBy: referrerClientId })
+    );
+
+    const leadId = Number(result.lastInsertRowid);
+
+    db.prepare(`
+      INSERT INTO referrals (referrer_client_id, referred_lead_id, status, created_at)
+      VALUES (?, ?, 'pending', datetime('now'))
+    `).run(referrerClientId, leadId);
+
+    this.log.info({ leadId, referrerClientId }, 'Referral lead created');
   }
 
   private getLeadStats() {

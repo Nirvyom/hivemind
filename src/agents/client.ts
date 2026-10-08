@@ -16,7 +16,14 @@ export class ClientAgent extends BaseAgent {
           await this.createProposal(task.payload);
           break;
         case 'create_invoice':
-          await this.createInvoice(task.payload);
+          // Forward to Billing agent
+          this.sendMessage('billing', 'task', { ...task.payload }, 1);
+          break;
+        case 'review_result':
+          await this.handleLegalReview(task.payload);
+          break;
+        case 'contract_ready':
+          await this.handleContractReady(task.payload);
           break;
         case 'send_email':
           await this.sendEmail(task.payload);
@@ -28,8 +35,8 @@ export class ClientAgent extends BaseAgent {
     // Check for qualified leads to convert
     await this.checkQualifiedLeads();
 
-    // Check for pending invoices
-    await this.checkPendingInvoices();
+    // Onboard won leads
+    await this.checkWonLeads();
 
     // Report
     const stats = this.getClientStats();
@@ -109,91 +116,64 @@ Return JSON:
         WHERE id = ?
       `).run(JSON.stringify(proposal), leadId);
 
-      this.log.info({ lead: lead.name, value: proposal.pricing?.total }, 'Proposal created');
+      // Send proposal to Legal for review
+      this.sendMessage('legal', 'task', {
+        type: 'review_proposal',
+        leadId,
+        proposal,
+      }, 1);
+
+      this.log.info({ lead: lead.name, value: proposal.pricing?.total }, 'Proposal created, sent to Legal for review');
     } catch (err: any) {
       this.log.error({ err }, 'Failed to create proposal');
     }
   }
 
-  private async createInvoice(payload: any): Promise<void> {
-    const { clientId, amount, description, productName } = payload;
+  private async handleLegalReview(payload: any): Promise<void> {
+    const { leadId, approved, riskLevel, issues, recommendations, requiredClauses } = payload;
+    const db = getSqlite();
 
-    if (!this.config.stripe?.secretKey) {
-      this.log.warn('Stripe not configured, skipping invoice creation');
-      return;
-    }
+    const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(leadId) as any;
+    if (!lead) return;
 
-    try {
-      const { default: Stripe } = await import('stripe');
-      const stripe = new Stripe(this.config.stripe.secretKey);
+    if (approved) {
+      // Request contract generation from Legal
+      const notes = lead.notes ? JSON.parse(lead.notes) : {};
+      this.sendMessage('legal', 'task', {
+        type: 'generate_contract',
+        leadId,
+        clientName: lead.name,
+        clientCompany: lead.company,
+        proposal: notes.proposal,
+      }, 1);
 
-      const db = getSqlite();
-      const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(clientId) as any;
-      if (!client) return;
-
-      // Determine actual pricing from product catalog if productName is provided
-      let invoiceAmount = amount;
-      let invoiceDescription = description;
-
-      if (productName) {
-        const product = (this.config.products || []).find(p => p.name === productName && p.active);
-        if (product && product.pricing.length > 0) {
-          const tier = product.pricing[0]; // default to first tier
-          invoiceAmount = invoiceAmount || tier.price;
-          invoiceDescription = invoiceDescription || `${product.name} — ${tier.name} (${tier.billingCycle})`;
-        }
-      }
-
-      // Create or get Stripe customer
-      let customerId = client.stripe_customer_id;
-      if (!customerId) {
-        const customer = await stripe.customers.create({
-          name: client.name,
-          email: client.email,
-          metadata: { hivemindClientId: String(clientId) },
-        });
-        customerId = customer.id;
-
-        db.prepare('UPDATE clients SET stripe_customer_id = ? WHERE id = ?')
-          .run(customerId, clientId);
-      }
-
-      // Create invoice
-      const invoice = await stripe.invoices.create({
-        customer: customerId,
-        auto_advance: true,
-      });
-
-      await stripe.invoiceItems.create({
-        customer: customerId,
-        invoice: invoice.id,
-        amount: Math.round(invoiceAmount * 100),
-        currency: 'usd',
-        description: invoiceDescription || `Services - ${this.config.company.name}`,
-      });
-
-      const finalizedInvoice = await stripe.invoices.finalizeInvoice(invoice.id);
-
-      // Record transaction
       db.prepare(`
-        INSERT INTO transactions (type, category, amount, description, stripe_invoice_id, client_id, created_at)
-        VALUES ('revenue', 'invoice_payment', ?, ?, ?, ?, datetime('now'))
-      `).run(invoiceAmount, invoiceDescription, invoice.id, clientId);
+        UPDATE leads SET notes = json_set(COALESCE(notes, '{}'), '$.legalApproved', 1, '$.riskLevel', ?),
+        updated_at = datetime('now') WHERE id = ?
+      `).run(riskLevel, leadId);
 
-      this.log.info({ clientId, amount: invoiceAmount, invoiceId: invoice.id }, 'Invoice created');
+      this.log.info({ leadId, riskLevel }, 'Proposal approved by Legal, contract requested');
+    } else {
+      this.log.warn({ leadId, issues }, 'Proposal flagged by Legal');
 
-      // Send invoice URL to client
-      if (finalizedInvoice.hosted_invoice_url) {
-        this.log.info({ url: finalizedInvoice.hosted_invoice_url }, 'Invoice URL generated');
-      }
-    } catch (err: any) {
-      this.log.error({ err }, 'Failed to create Stripe invoice');
-      this.sendMessage('ops', 'alert', {
-        type: 'invoice_failure',
-        error: err.message,
-        clientId,
-      }, 2);
+      db.prepare(`
+        UPDATE leads SET notes = json_set(COALESCE(notes, '{}'), '$.legalIssues', ?, '$.riskLevel', ?),
+        updated_at = datetime('now') WHERE id = ?
+      `).run(JSON.stringify(issues), riskLevel, leadId);
     }
+  }
+
+  private async handleContractReady(payload: any): Promise<void> {
+    const { leadId, contractTitle, keyTerms } = payload;
+    const db = getSqlite();
+
+    db.prepare(`
+      UPDATE leads SET status = 'contract',
+      notes = json_set(COALESCE(notes, '{}'), '$.contractTitle', ?, '$.keyTerms', ?),
+      updated_at = datetime('now') WHERE id = ?
+    `).run(contractTitle, JSON.stringify(keyTerms), leadId);
+
+    this.log.info({ leadId, contractTitle }, 'Contract ready for client');
   }
 
   private async sendEmail(payload: any): Promise<void> {
@@ -244,29 +224,99 @@ Return JSON:
     }
   }
 
-  private async checkPendingInvoices(): Promise<void> {
-    if (!this.config.stripe?.secretKey) return;
+  private async checkWonLeads(): Promise<void> {
+    const db = getSqlite();
+    const wonLeads = db.prepare(`
+      SELECT id FROM leads
+      WHERE status = 'closed_won'
+      AND id NOT IN (SELECT COALESCE(lead_id, 0) FROM clients)
+    `).all() as any[];
 
-    try {
-      const { default: Stripe } = await import('stripe');
-      const stripe = new Stripe(this.config.stripe.secretKey);
-
-      const invoices = await stripe.invoices.list({
-        status: 'open',
-        limit: 10,
-      });
-
-      for (const invoice of invoices.data) {
-        if (invoice.status === 'paid') {
-          const db = getSqlite();
-          db.prepare(`
-            UPDATE transactions SET type = 'revenue' WHERE stripe_invoice_id = ?
-          `).run(invoice.id);
-        }
-      }
-    } catch (err: any) {
-      this.log.debug({ err }, 'Failed to check invoices');
+    for (const lead of wonLeads) {
+      await this.onboardClient(lead.id);
     }
+  }
+
+  async onboardClient(leadId: number): Promise<void> {
+    const db = getSqlite();
+
+    const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(leadId) as any;
+    if (!lead) {
+      this.log.warn({ leadId }, 'Lead not found for onboarding');
+      return;
+    }
+
+    // Check if client already exists for this lead
+    const existingClient = db.prepare('SELECT id FROM clients WHERE lead_id = ?').get(leadId);
+    if (existingClient) {
+      this.log.info({ leadId }, 'Client already exists for this lead');
+      return;
+    }
+
+    const notes = lead.notes ? JSON.parse(lead.notes) : {};
+
+    // 1. Create client record from lead data
+    const result = db.prepare(`
+      INSERT INTO clients (lead_id, name, email, company, contract_value, status, signed_at, created_at)
+      VALUES (?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'))
+    `).run(
+      lead.id,
+      lead.name,
+      lead.email || 'unknown@example.com',
+      lead.company || null,
+      notes.proposal?.pricing?.total || 0
+    );
+
+    const clientId = Number(result.lastInsertRowid);
+
+    // Update lead status
+    db.prepare(`
+      UPDATE leads SET status = 'closed_won', updated_at = datetime('now') WHERE id = ?
+    `).run(leadId);
+
+    // 2. Send welcome email sequence (via Email Campaign agent)
+    this.sendMessage('email_campaign', 'task', {
+      type: 'send_welcome',
+      clientId,
+      clientName: lead.name,
+      clientEmail: lead.email,
+    });
+
+    // 3. Generate NDA (via Legal)
+    this.sendMessage('legal', 'task', {
+      type: 'generate_nda',
+      clientId,
+      clientName: lead.name,
+      clientCompany: lead.company,
+    });
+
+    // 4. Create subscription (via Billing)
+    this.sendMessage('billing', 'task', {
+      type: 'create_subscription',
+      clientId,
+      clientName: lead.name,
+      product: notes.recommendedProduct,
+      value: notes.proposal?.pricing?.total || 0,
+    });
+
+    // 5. Notify CEO + founder
+    this.sendMessage('ceo', 'report', {
+      type: 'new_client',
+      clientId,
+      clientName: lead.name,
+      company: lead.company,
+      value: notes.proposal?.pricing?.total || 0,
+    }, 2);
+
+    // 6. Log in audit trail
+    this.audit('client_onboarded', 'client', clientId, {
+      leadId,
+      clientName: lead.name,
+      company: lead.company,
+      value: notes.proposal?.pricing?.total || 0,
+    });
+
+    this.log.info({ clientId, clientName: lead.name, leadId }, 'Client onboarded');
   }
 
   private getClientStats() {

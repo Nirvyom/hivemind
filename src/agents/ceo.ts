@@ -19,6 +19,15 @@ export class CEOAgent extends BaseAgent {
       this.markMessageProcessed(alert.id);
     }
 
+    // Handle task messages (approval requests, etc.)
+    const tasks = messages.filter(m => m.type === 'task');
+    for (const task of tasks) {
+      if (task.payload.type === 'approval_request') {
+        await this.handleApprovalRequest(task.payload);
+      }
+      this.markMessageProcessed(task.id);
+    }
+
     // Generate or update weekly strategy
     const strategy = await this.generateStrategy(reports);
 
@@ -81,12 +90,17 @@ PRODUCT CATALOG:
 ${productCatalog}
 
 CORPORATE STRUCTURE:
-You oversee the following departments:
+You oversee the following departments (11 agents):
 - Content Department: Creates marketing content across platforms
 - Sales Department: Identifies leads, generates outreach, manages pipeline
-- Client Services: Manages proposals, invoicing, and client relationships
-- Operations: Monitors budgets, agent health, and financial reporting
+- Client Services: Manages proposals and client relationships
+- Operations: Monitors agent health, cost tracking, system alerts
 - Social Media: Publishes and schedules content across platforms
+- HR Department: Org chart, performance reviews, company policies
+- Finance Department: Chart of accounts, P&L, budgets, revenue forecasting
+- Legal Department: Contract generation, compliance, NDAs, standard documents
+- Billing Department: Invoicing, subscriptions, recurring billing, payment tracking
+- Procurement Department: Vendor management, purchase orders, cost optimization
 
 Think like a real corporate CEO. Your strategy should reference specific products by name,
 direct content to highlight specific product features and pricing, and sales to target
@@ -159,13 +173,19 @@ Generate a JSON strategy with:
       }, 1);
     }
 
-    // Send budget guidance to ops
-    this.sendMessage('ops', 'task', {
+    // Send budget guidance to finance (previously ops)
+    this.sendMessage('finance', 'task', {
       type: 'budget_update',
       guidance: strategy.budgetGuidance,
     });
 
-    // Broadcast strategy summary
+    // Send operational guidance to ops
+    this.sendMessage('ops', 'task', {
+      type: 'ops_update',
+      guidance: strategy.budgetGuidance,
+    });
+
+    // Broadcast strategy summary to all agents
     this.sendMessage('broadcast', 'strategy', {
       weeklyTheme: strategy.weeklyTheme,
       notes: strategy.notes,
@@ -193,6 +213,26 @@ Generate a JSON strategy with:
       await notifyFounder(this.config, 'digest', digest, { subject: `Weekly Digest — ${this.config.company.name}` });
     } catch (err: any) {
       this.log.error({ err }, 'Failed to send founder digest');
+    }
+  }
+
+  private async handleApprovalRequest(payload: any): Promise<void> {
+    const { entity, poNumber, category, title } = payload;
+    const db = getSqlite();
+
+    if (entity === 'purchase_order' && poNumber) {
+      // Auto-approve POs under threshold, flag others for founder review
+      db.prepare(`
+        UPDATE purchase_orders SET status = 'approved', approved_by = 'ceo', approved_at = datetime('now'), updated_at = datetime('now')
+        WHERE po_number = ? AND status = 'pending_approval'
+      `).run(poNumber);
+      this.log.info({ poNumber }, 'Purchase order approved by CEO');
+    } else if (entity === 'policy' && category) {
+      db.prepare(`
+        UPDATE policies SET status = 'active', approved_by = 'ceo', updated_at = datetime('now')
+        WHERE category = ? AND status = 'draft'
+      `).run(category);
+      this.log.info({ category, title }, 'Policy approved by CEO');
     }
   }
 

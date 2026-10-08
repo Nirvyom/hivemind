@@ -24,9 +24,8 @@ export class OpsAgent extends BaseAgent {
       this.markMessageProcessed(task.id);
     }
 
-    // Core monitoring duties
+    // Core monitoring duties (budget checking moved to Finance agent)
     await this.trackCosts();
-    await this.checkBudget();
     await this.monitorAgentHealth();
 
     // Post daily digest to Notion
@@ -70,78 +69,10 @@ export class OpsAgent extends BaseAgent {
     this.log.info({ monthlySpend: costs.total }, 'Monthly cost tracking');
   }
 
-  private async checkBudget(): Promise<void> {
-    const db = getSqlite();
-
-    const monthStart = new Date();
-    monthStart.setDate(1);
-    monthStart.setHours(0, 0, 0, 0);
-
-    const expenses = (db.prepare(`
-      SELECT COALESCE(SUM(amount), 0) as total
-      FROM transactions
-      WHERE type = 'expense' AND created_at >= ?
-    `).get(monthStart.toISOString()) as any).total;
-
-    const revenue = (db.prepare(`
-      SELECT COALESCE(SUM(amount), 0) as total
-      FROM transactions
-      WHERE type = 'revenue' AND created_at >= ?
-    `).get(monthStart.toISOString()) as any).total;
-
-    const budget = this.config.budget.monthlyLimit;
-    const utilization = budget > 0 ? expenses / budget : 0;
-
-    if (utilization >= this.config.budget.alertThreshold) {
-      this.log.warn({
-        expenses,
-        budget,
-        utilization: `${(utilization * 100).toFixed(1)}%`,
-      }, 'Budget threshold reached');
-
-      // Alert CEO
-      this.sendMessage('ceo', 'alert', {
-        type: 'budget_warning',
-        expenses,
-        budget,
-        utilization,
-        revenue,
-        recommendation: utilization >= 1
-          ? 'CRITICAL: Over budget. Consider switching to cheaper LLM model or pausing non-essential agents.'
-          : 'Approaching budget limit. Monitor spending.',
-      }, 3);
-
-      // Notify founder via Telegram/email
-      const pct = (utilization * 100).toFixed(1);
-      await notifyFounder(this.config, 'alert',
-        `Budget ${utilization >= 1 ? 'EXCEEDED' : 'warning'}: ${pct}% used ($${expenses.toFixed(2)} of $${budget}/month). Revenue: $${revenue.toFixed(2)}.`,
-        { subject: `Budget ${utilization >= 1 ? 'Exceeded' : 'Warning'}: ${pct}%`, urgent: utilization >= 1 }
-      ).catch(err => this.log.error({ err }, 'Failed to notify founder about budget'));
-
-      // If over budget, suggest model degradation
-      if (utilization >= 1) {
-        this.sendMessage('broadcast', 'alert', {
-          type: 'budget_exceeded',
-          action: 'reduce_spending',
-          message: 'Budget exceeded. Reducing LLM calls to essential operations only.',
-        }, 3);
-      }
-    }
-
-    // Track margin
-    const margin = revenue > 0 ? ((revenue - expenses) / revenue) * 100 : -100;
-    this.log.info({
-      expenses,
-      revenue,
-      margin: `${margin.toFixed(1)}%`,
-      budgetUtilization: `${(utilization * 100).toFixed(1)}%`,
-    }, 'Financial summary');
-  }
-
   private async monitorAgentHealth(): Promise<void> {
     const db = getSqlite();
 
-    const agents = ['ceo', 'content', 'social', 'sales', 'client', 'ops'];
+    const agents = ['ceo', 'content', 'social', 'sales', 'client', 'ops', 'hr', 'finance', 'legal', 'billing', 'procurement', 'analytics', 'email_campaign', 'support', 'competitor'];
     const unhealthy: string[] = [];
 
     for (const agent of agents) {
@@ -256,7 +187,7 @@ export class OpsAgent extends BaseAgent {
 
   private getHealthReport() {
     const db = getSqlite();
-    const agents = ['ceo', 'content', 'social', 'sales', 'client', 'ops'];
+    const agents = ['ceo', 'content', 'social', 'sales', 'client', 'ops', 'hr', 'finance', 'legal', 'billing', 'procurement', 'analytics', 'email_campaign', 'support', 'competitor'];
 
     return agents.map(agent => {
       const lastRun = db.prepare(`
