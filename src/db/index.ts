@@ -722,6 +722,26 @@ export function initializeDatabase(): void {
       // Column already exists
     }
   }
+
+  // Webhook idempotency column
+  try {
+    sqlite.exec(`ALTER TABLE webhook_events ADD COLUMN provider_event_id TEXT`);
+  } catch {
+    // Column already exists
+  }
+
+  // Webhook dedup index
+  sqlite.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_webhook_events_provider_dedup
+      ON webhook_events(source, provider_event_id)
+      WHERE provider_event_id IS NOT NULL
+  `);
+
+  // Better approval lookups
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS idx_approvals_agent_status
+      ON approvals(agent, status)
+  `);
 }
 
 export { schema };

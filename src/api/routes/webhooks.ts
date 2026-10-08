@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { HivemindConfig } from '../../config/schema.js';
-import { sendJson, parseBody } from '../middleware.js';
+import { authenticate, sendJson, parseRawBody, parseBody } from '../middleware.js';
 import { getSqlite } from '../../db/index.js';
 import { getLogger } from '../../utils/logger.js';
 import crypto from 'node:crypto';
@@ -31,10 +31,15 @@ export async function handleWebhooks(
   } else if (pathname === '/webhooks/razorpay') {
     await handleRazorpayWebhook(req, res, config);
   } else if (pathname === '/webhooks/generic') {
-    await handleGenericWebhook(req, res);
+    await handleGenericWebhook(req, res, config);
   } else {
     sendJson(res, { error: 'Unknown webhook endpoint' }, 404);
   }
+}
+
+function timingSafeCompare(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
 
 async function handleStripeWebhook(
@@ -42,40 +47,39 @@ async function handleStripeWebhook(
   res: ServerResponse,
   config: HivemindConfig
 ): Promise<void> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    chunks.push(chunk as Buffer);
-  }
-  const rawBody = Buffer.concat(chunks).toString();
-
-  // Verify Stripe signature if webhook secret is configured
+  // Require webhook secret — refuse unsigned webhooks
   const webhookSecret = config.stripe?.webhookSecret;
-  if (webhookSecret) {
-    const sigHeader = req.headers['stripe-signature'] as string;
-    if (!sigHeader) {
-      sendJson(res, { error: 'Missing stripe-signature header' }, 400);
-      return;
-    }
+  if (!webhookSecret) {
+    sendJson(res, { error: 'Stripe webhook secret not configured' }, 503);
+    return;
+  }
 
-    const elements = sigHeader.split(',');
-    const timestamp = elements.find(e => e.startsWith('t='))?.split('=')[1];
-    const signature = elements.find(e => e.startsWith('v1='))?.split('=')[1];
+  const rawBody = await parseRawBody(req);
 
-    if (!timestamp || !signature) {
-      sendJson(res, { error: 'Invalid signature format' }, 400);
-      return;
-    }
+  const sigHeader = req.headers['stripe-signature'] as string;
+  if (!sigHeader) {
+    sendJson(res, { error: 'Missing stripe-signature header' }, 400);
+    return;
+  }
 
-    const signedPayload = `${timestamp}.${rawBody}`;
-    const expectedSig = crypto
-      .createHmac('sha256', webhookSecret)
-      .update(signedPayload)
-      .digest('hex');
+  const elements = sigHeader.split(',');
+  const timestamp = elements.find(e => e.startsWith('t='))?.split('=')[1];
+  const signature = elements.find(e => e.startsWith('v1='))?.split('=')[1];
 
-    if (signature !== expectedSig) {
-      sendJson(res, { error: 'Invalid signature' }, 400);
-      return;
-    }
+  if (!timestamp || !signature) {
+    sendJson(res, { error: 'Invalid signature format' }, 400);
+    return;
+  }
+
+  const signedPayload = `${timestamp}.${rawBody}`;
+  const expectedSig = crypto
+    .createHmac('sha256', webhookSecret)
+    .update(signedPayload)
+    .digest('hex');
+
+  if (!timingSafeCompare(signature, expectedSig)) {
+    sendJson(res, { error: 'Invalid signature' }, 400);
+    return;
   }
 
   let event: any;
@@ -88,11 +92,25 @@ async function handleStripeWebhook(
 
   const db = getSqlite();
 
+  // Idempotency: check for duplicate event by provider_event_id
+  const providerEventId = event.id || null;
+  if (providerEventId) {
+    const existing = db.prepare(
+      "SELECT id FROM webhook_events WHERE source = 'stripe' AND provider_event_id = ?"
+    ).get(providerEventId) as { id: number } | undefined;
+
+    if (existing) {
+      log.info({ providerEventId }, 'Duplicate Stripe webhook event, skipping');
+      sendJson(res, { received: true, duplicate: true });
+      return;
+    }
+  }
+
   // Store webhook event
   const result = db.prepare(`
-    INSERT INTO webhook_events (source, event_type, payload, status, created_at)
-    VALUES ('stripe', ?, ?, 'pending', datetime('now'))
-  `).run(event.type, rawBody);
+    INSERT INTO webhook_events (source, event_type, payload, provider_event_id, status, created_at)
+    VALUES ('stripe', ?, ?, ?, 'pending', datetime('now'))
+  `).run(event.type, rawBody, providerEventId);
 
   const eventId = Number(result.lastInsertRowid);
 
@@ -172,30 +190,29 @@ async function handleRazorpayWebhook(
   res: ServerResponse,
   config: HivemindConfig
 ): Promise<void> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    chunks.push(chunk as Buffer);
-  }
-  const rawBody = Buffer.concat(chunks).toString();
-
-  // Verify signature if webhook secret is configured
+  // Require webhook secret — refuse unsigned webhooks
   const webhookSecret = config.razorpay?.webhookSecret;
-  if (webhookSecret) {
-    const signature = req.headers['x-razorpay-signature'] as string;
-    if (!signature) {
-      sendJson(res, { error: 'Missing x-razorpay-signature header' }, 400);
-      return;
-    }
+  if (!webhookSecret) {
+    sendJson(res, { error: 'Razorpay webhook secret not configured' }, 503);
+    return;
+  }
 
-    const expectedSig = crypto
-      .createHmac('sha256', webhookSecret)
-      .update(rawBody)
-      .digest('hex');
+  const rawBody = await parseRawBody(req);
 
-    if (signature !== expectedSig) {
-      sendJson(res, { error: 'Invalid signature' }, 400);
-      return;
-    }
+  const signature = req.headers['x-razorpay-signature'] as string;
+  if (!signature) {
+    sendJson(res, { error: 'Missing x-razorpay-signature header' }, 400);
+    return;
+  }
+
+  const expectedSig = crypto
+    .createHmac('sha256', webhookSecret)
+    .update(rawBody)
+    .digest('hex');
+
+  if (!timingSafeCompare(signature, expectedSig)) {
+    sendJson(res, { error: 'Invalid signature' }, 400);
+    return;
   }
 
   let event: any;
@@ -209,11 +226,28 @@ async function handleRazorpayWebhook(
   const db = getSqlite();
   const eventType = event.event || 'unknown';
 
+  // Idempotency: check for duplicate event
+  const providerEventId = event.account_id && event.event
+    ? `${event.account_id}_${event.event}_${event.payload?.payment?.entity?.id || event.payload?.payment_link?.entity?.id || ''}`
+    : null;
+
+  if (providerEventId) {
+    const existing = db.prepare(
+      "SELECT id FROM webhook_events WHERE source = 'razorpay' AND provider_event_id = ?"
+    ).get(providerEventId) as { id: number } | undefined;
+
+    if (existing) {
+      log.info({ providerEventId }, 'Duplicate Razorpay webhook event, skipping');
+      sendJson(res, { received: true, duplicate: true });
+      return;
+    }
+  }
+
   // Store webhook event
   const result = db.prepare(`
-    INSERT INTO webhook_events (source, event_type, payload, status, created_at)
-    VALUES ('razorpay', ?, ?, 'pending', datetime('now'))
-  `).run(eventType, rawBody);
+    INSERT INTO webhook_events (source, event_type, payload, provider_event_id, status, created_at)
+    VALUES ('razorpay', ?, ?, ?, 'pending', datetime('now'))
+  `).run(eventType, rawBody, providerEventId);
 
   const eventId = Number(result.lastInsertRowid);
 
@@ -281,8 +315,12 @@ async function handleRazorpayWebhook(
 
 async function handleGenericWebhook(
   req: IncomingMessage,
-  res: ServerResponse
+  res: ServerResponse,
+  config: HivemindConfig
 ): Promise<void> {
+  // Generic webhooks require API authentication
+  if (!authenticate(req, res, config)) return;
+
   const body = await parseBody(req);
   const db = getSqlite();
 

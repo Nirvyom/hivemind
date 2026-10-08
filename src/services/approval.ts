@@ -64,6 +64,19 @@ export async function createApproval(
   const expiresIn = request.expiresIn || config.approvals?.defaultExpiry || '24h';
   const expiresAt = parseExpiryDuration(expiresIn).toISOString();
 
+  // Duplicate prevention: check for existing active approval
+  const existing = db.prepare(`
+    SELECT id FROM approvals
+    WHERE agent = ? AND type = ? AND entity_type = ? AND entity_id = ?
+      AND status IN ('pending', 'approved')
+    LIMIT 1
+  `).get(request.agent, request.type, request.entityType, request.entityId || null) as { id: number } | undefined;
+
+  if (existing) {
+    log.info({ existingId: existing.id, agent: request.agent, type: request.type }, 'Duplicate approval skipped');
+    return existing.id;
+  }
+
   // Check auto-approve
   const autoApproveTypes = config.approvals?.autoApproveTypes || [];
   const shouldAutoApprove = autoApproveTypes.includes(request.type);
@@ -138,15 +151,21 @@ export async function processApprovalResponse(
 ): Promise<void> {
   const db = getSqlite();
 
-  const approval = db.prepare('SELECT * FROM approvals WHERE id = ?').get(approvalId) as Approval | undefined;
-  if (!approval) throw new Error(`Approval ${approvalId} not found`);
-  if (approval.status !== 'pending') throw new Error(`Approval ${approvalId} already ${approval.status}`);
-
+  // Atomic approve/reject: single UPDATE that only succeeds if status is still 'pending'
   const newStatus = approved ? 'approved' : 'rejected';
-  db.prepare(`
+  const result = db.prepare(`
     UPDATE approvals SET status = ?, reviewed_by = ?, review_note = ?, reviewed_at = datetime('now')
-    WHERE id = ?
+    WHERE id = ? AND status = 'pending'
   `).run(newStatus, reviewedBy, reviewNote, approvalId);
+
+  if (result.changes === 0) {
+    const existing = db.prepare('SELECT status FROM approvals WHERE id = ?').get(approvalId) as { status: string } | undefined;
+    if (!existing) throw new Error(`Approval ${approvalId} not found`);
+    throw new Error(`Approval ${approvalId} already processed (status: ${existing.status})`);
+  }
+
+  // Fetch the approval for Telegram update
+  const approval = db.prepare('SELECT * FROM approvals WHERE id = ?').get(approvalId) as Approval;
 
   // Update Telegram message to show result
   try {
@@ -192,9 +211,12 @@ export function getApprovedActions(agent: string): Approval[] {
   ).all(agent) as Approval[];
 }
 
-export function markApprovalExecuted(approvalId: number): void {
+export function markApprovalExecuted(approvalId: number): boolean {
   const db = getSqlite();
-  db.prepare("UPDATE approvals SET status = 'executed' WHERE id = ?").run(approvalId);
+  const result = db.prepare(
+    "UPDATE approvals SET status = 'executed' WHERE id = ? AND status = 'approved'"
+  ).run(approvalId);
+  return result.changes === 1;
 }
 
 export function expireOldApprovals(): number {

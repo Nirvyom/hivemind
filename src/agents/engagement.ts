@@ -161,7 +161,11 @@ export class EngagementAgent extends BaseAgent {
           `).run(actionData.leadId, approval.draftContent);
         }
 
-        markApprovalExecuted(approval.id);
+        const claimed = markApprovalExecuted(approval.id);
+        if (!claimed) {
+          this.log.warn({ approvalId: approval.id }, 'Approval already claimed');
+          continue;
+        }
       } catch (err) {
         this.log.error({ err, approvalId: approval.id }, 'Failed to process approved proposal');
       }

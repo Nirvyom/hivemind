@@ -16,8 +16,10 @@ export function createApiServer(config: HivemindConfig): http.Server {
     const pathname = url.pathname;
     const method = req.method || 'GET';
 
-    // CORS headers
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    // CORS headers — restrict to localhost origins
+    const origin = req.headers.origin;
+    const allowedOrigin = origin?.startsWith('http://localhost') ? origin : '';
+    res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
@@ -273,8 +275,8 @@ export function startApiServer(config: HivemindConfig): http.Server | null {
   const port = config.api.port || 9474;
   const server = createApiServer(config);
 
-  server.listen(port, () => {
-    log.info({ port }, 'API server listening');
+  server.listen(port, '127.0.0.1', () => {
+    log.info({ port, host: '127.0.0.1' }, 'API server listening');
   });
 
   return server;

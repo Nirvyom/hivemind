@@ -1,7 +1,7 @@
 {
   "name": "hivemind-ai",
-  "version": "0.1.0",
-  "description": "Autonomous AI Company Builder - spawn AI agents to run your company's digital presence",
+  "version": "0.2.0",
+  "description": "Approval-first revenue execution system for service businesses",
   "type": "module",
   "bin": {
     "hivemind": "./dist/bin/hivemind.js"
@@ -10,7 +10,8 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/bin/hivemind.js",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "test": "vitest run"
   },
   "keywords": [
     "ai",
@@ -45,6 +46,7 @@
     "@types/node-cron": "^3.0.0",
     "@types/react": "^18.3.0",
     "drizzle-kit": "^0.30.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
   }
 }
