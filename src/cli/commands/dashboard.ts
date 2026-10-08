@@ -1,6 +1,7 @@
 import chalk from 'chalk';
 import { configExists, loadConfig, getDaemonPid } from '../../config/index.js';
 import { initializeDatabase, getSqlite } from '../../db/index.js';
+import { createAgents } from '../../agents/index.js';
 
 export async function dashboardCommand(): Promise<void> {
   if (!configExists()) {
@@ -11,7 +12,6 @@ export async function dashboardCommand(): Promise<void> {
   const config = loadConfig();
   initializeDatabase();
 
-  // Use a simple refresh loop instead of Ink for broader compatibility
   const render = () => {
     const db = getSqlite();
 
@@ -19,46 +19,78 @@ export async function dashboardCommand(): Promise<void> {
     const pid = getDaemonPid();
 
     // Header
-    console.log(chalk.bold.cyan('╔══════════════════════════════════════════════════════════════╗'));
-    console.log(chalk.bold.cyan(`║  🐝 Hivemind Dashboard — ${config.company.name.padEnd(34)}║`));
-    console.log(chalk.bold.cyan('╠══════════════════════════════════════════════════════════════╣'));
+    console.log(chalk.bold.cyan('\u2554' + '\u2550'.repeat(62) + '\u2557'));
+    console.log(chalk.bold.cyan(`\u2551  \u{1f41d} Hivemind Revenue OS \u2014 ${config.company.name.padEnd(36)}\u2551`));
+    console.log(chalk.bold.cyan('\u2560' + '\u2550'.repeat(62) + '\u2563'));
 
     // Daemon status
-    const status = pid ? chalk.green('● Running') : chalk.red('● Stopped');
-    console.log(chalk.cyan(`║  Daemon: ${status}${' '.repeat(49 - (pid ? 9 : 9))}║`));
-    console.log(chalk.cyan('╠══════════════════════════════════════════════════════════════╣'));
+    const status = pid ? chalk.green('\u25cf Running') : chalk.red('\u25cf Stopped');
+    console.log(chalk.cyan(`\u2551  Daemon: ${status}${' '.repeat(49 - (pid ? 9 : 9))}\u2551`));
+    console.log(chalk.cyan('\u2560' + '\u2550'.repeat(62) + '\u2563'));
 
-    // Agents
-    console.log(chalk.cyan('║  ') + chalk.bold('AGENTS') + ' '.repeat(54) + chalk.cyan('║'));
-    const agents = ['ceo', 'content', 'social', 'sales', 'client', 'ops'];
-    const intervals: Record<string, string> = {
-      ceo: '6h', content: '4h', social: '30m', sales: '2h', client: '1h', ops: '15m'
-    };
+    // Active Agents
+    const agentSchedules = createAgents(config);
+    const modeTag = config.legacyAgents?.enabled ? ' (FULL COMPANY)' : '';
+    const headerText = `ACTIVE AGENTS${modeTag}`;
+    console.log(chalk.cyan('\u2551  ') + chalk.bold(headerText) + ' '.repeat(Math.max(0, 60 - headerText.length)) + chalk.cyan('\u2551'));
+    const agents = agentSchedules.map(s => ({
+      name: s.agent.name,
+      display: s.agent.name.toUpperCase(),
+      interval: s.interval,
+    }));
 
     for (const agent of agents) {
       const lastRun = db.prepare(`
         SELECT status, completed_at FROM agent_runs
         WHERE agent = ? ORDER BY id DESC LIMIT 1
-      `).get(agent) as any;
+      `).get(agent.name) as any;
 
-      const icon = !lastRun ? '⚪'
-        : lastRun.status === 'completed' ? '🟢'
-        : lastRun.status === 'running' ? '🔵'
-        : '🔴';
+      const icon = !lastRun ? '\u26aa'
+        : lastRun.status === 'completed' ? '\u{1f7e2}'
+        : lastRun.status === 'running' ? '\u{1f535}'
+        : '\u{1f534}';
 
       const time = lastRun?.completed_at ? timeSince(new Date(lastRun.completed_at)) : 'never';
-      const line = `  ${icon} ${agent.toUpperCase().padEnd(10)} [${intervals[agent]}]  Last: ${time}`;
-      console.log(chalk.cyan('║') + line.padEnd(62) + chalk.cyan('║'));
+      const line = `  ${icon} ${agent.display.padEnd(14)} [${agent.interval}]  Last: ${time}`;
+      console.log(chalk.cyan('\u2551') + line.padEnd(62) + chalk.cyan('\u2551'));
     }
 
-    console.log(chalk.cyan('╠══════════════════════════════════════════════════════════════╣'));
+    console.log(chalk.cyan('\u2560' + '\u2550'.repeat(62) + '\u2563'));
 
-    // Financials
-    console.log(chalk.cyan('║  ') + chalk.bold('FINANCIALS') + ' '.repeat(50) + chalk.cyan('║'));
+    // Pipeline
+    console.log(chalk.cyan('\u2551  ') + chalk.bold('SALES PIPELINE') + ' '.repeat(46) + chalk.cyan('\u2551'));
 
-    const monthStart = new Date();
-    monthStart.setDate(1);
-    monthStart.setHours(0, 0, 0, 0);
+    const stages = ['enquiry', 'qualified', 'responded', 'proposal_sent', 'negotiating', 'won', 'lost', 'dormant'];
+    for (const stage of stages) {
+      const count = (db.prepare('SELECT COUNT(*) as c FROM leads WHERE stage = ?').get(stage) as any).c;
+      if (count > 0) {
+        const line = `  ${stage.padEnd(20)} ${count}`;
+        console.log(chalk.cyan('\u2551') + line.padEnd(62) + chalk.cyan('\u2551'));
+      }
+    }
+
+    const totalLeads = (db.prepare("SELECT COUNT(*) as c FROM leads WHERE stage IS NOT NULL").get() as any).c;
+    if (totalLeads === 0) {
+      console.log(chalk.cyan('\u2551') + '  No leads yet'.padEnd(62) + chalk.cyan('\u2551'));
+    }
+
+    console.log(chalk.cyan('\u2560' + '\u2550'.repeat(62) + '\u2563'));
+
+    // Approvals
+    const pendingApprovals = (db.prepare(
+      "SELECT COUNT(*) as c FROM approvals WHERE status = 'pending'"
+    ).get() as any).c;
+
+    console.log(chalk.cyan('\u2551  ') + chalk.bold('APPROVALS') + ' '.repeat(51) + chalk.cyan('\u2551'));
+    const appLine = pendingApprovals > 0
+      ? chalk.yellow(`  ${pendingApprovals} pending`)
+      : chalk.green('  All clear');
+    console.log(chalk.cyan('\u2551') + appLine.padEnd(62 + (pendingApprovals > 0 ? 10 : 10)) + chalk.cyan('\u2551'));
+
+    console.log(chalk.cyan('\u2560' + '\u2550'.repeat(62) + '\u2563'));
+
+    // Revenue
+    console.log(chalk.cyan('\u2551  ') + chalk.bold('REVENUE') + ' '.repeat(53) + chalk.cyan('\u2551'));
 
     const revenue = (db.prepare(
       "SELECT COALESCE(SUM(amount), 0) as t FROM transactions WHERE type = 'revenue'"
@@ -66,113 +98,69 @@ export async function dashboardCommand(): Promise<void> {
     const expenses = (db.prepare(
       "SELECT COALESCE(SUM(amount), 0) as t FROM transactions WHERE type = 'expense'"
     ).get() as any).t;
-    const monthlyExp = (db.prepare(`
-      SELECT COALESCE(SUM(amount), 0) as t FROM transactions
-      WHERE type = 'expense' AND created_at >= ?
-    `).get(monthStart.toISOString()) as any).t;
 
-    const budgetPct = config.budget.monthlyLimit > 0
-      ? ((monthlyExp / config.budget.monthlyLimit) * 100).toFixed(0)
-      : '0';
+    const currency = config.defaultCurrency || 'INR';
+    const revLine = `  Revenue: ${currency} ${revenue.toFixed(2)}  Expenses: ${currency} ${expenses.toFixed(2)}  Net: ${currency} ${(revenue - expenses).toFixed(2)}`;
+    console.log(chalk.cyan('\u2551') + revLine.padEnd(62) + chalk.cyan('\u2551'));
 
-    const revLine = `  Revenue:  $${revenue.toFixed(2)}    Expenses: $${expenses.toFixed(2)}    Net: $${(revenue - expenses).toFixed(2)}`;
-    console.log(chalk.cyan('║') + revLine.padEnd(62) + chalk.cyan('║'));
+    // Payment links
+    const paidLinks = (db.prepare(
+      "SELECT COALESCE(SUM(amount), 0) as t FROM payment_links WHERE status = 'paid'"
+    ).get() as any).t;
+    const pendingLinks = (db.prepare(
+      "SELECT COUNT(*) as c FROM payment_links WHERE status IN ('created', 'sent')"
+    ).get() as any).c;
 
-    const budgetLine = `  Budget:   ${budgetPct}% of $${config.budget.monthlyLimit}/mo`;
-    console.log(chalk.cyan('║') + budgetLine.padEnd(62) + chalk.cyan('║'));
+    if (paidLinks > 0 || pendingLinks > 0) {
+      const payLine = `  Collected: ${currency} ${paidLinks.toFixed(2)}  Pending links: ${pendingLinks}`;
+      console.log(chalk.cyan('\u2551') + payLine.padEnd(62) + chalk.cyan('\u2551'));
+    }
 
-    console.log(chalk.cyan('╠══════════════════════════════════════════════════════════════╣'));
+    console.log(chalk.cyan('\u2560' + '\u2550'.repeat(62) + '\u2563'));
 
-    // Content Pipeline
-    console.log(chalk.cyan('║  ') + chalk.bold('CONTENT PIPELINE') + ' '.repeat(44) + chalk.cyan('║'));
+    // Exceptions
+    const staleLeads = (db.prepare(`
+      SELECT COUNT(*) as c FROM leads
+      WHERE next_action_due IS NOT NULL AND next_action_due < datetime('now')
+        AND stage NOT IN ('won', 'lost', 'dormant')
+    `).get() as any).c;
 
-    const contentStats = db.prepare(
-      'SELECT status, COUNT(*) as c FROM content GROUP BY status'
-    ).all() as any[];
+    const overduePayments = (db.prepare(`
+      SELECT COUNT(*) as c FROM payment_links
+      WHERE status IN ('created', 'sent') AND created_at < datetime('now', '-7 days')
+    `).get() as any).c;
 
-    if (contentStats.length > 0) {
-      for (const stat of contentStats) {
-        const line = `  ${stat.status.padEnd(20)} ${stat.c}`;
-        console.log(chalk.cyan('║') + line.padEnd(62) + chalk.cyan('║'));
+    if (staleLeads > 0 || overduePayments > 0) {
+      console.log(chalk.cyan('\u2551  ') + chalk.bold('EXCEPTIONS') + ' '.repeat(50) + chalk.cyan('\u2551'));
+      if (staleLeads > 0) {
+        const staleLine = `  ${staleLeads} stale leads past due`;
+        console.log(chalk.cyan('\u2551') + chalk.yellow(staleLine).padEnd(62 + 10) + chalk.cyan('\u2551'));
       }
-    } else {
-      console.log(chalk.cyan('║') + '  No content yet'.padEnd(62) + chalk.cyan('║'));
-    }
-
-    console.log(chalk.cyan('╠══════════════════════════════════════════════════════════════╣'));
-
-    // Lead Pipeline
-    console.log(chalk.cyan('║  ') + chalk.bold('LEAD PIPELINE') + ' '.repeat(47) + chalk.cyan('║'));
-
-    const leadStats = db.prepare(
-      'SELECT status, COUNT(*) as c FROM leads GROUP BY status'
-    ).all() as any[];
-
-    if (leadStats.length > 0) {
-      for (const stat of leadStats) {
-        const line = `  ${stat.status.padEnd(20)} ${stat.c}`;
-        console.log(chalk.cyan('║') + line.padEnd(62) + chalk.cyan('║'));
+      if (overduePayments > 0) {
+        const overLine = `  ${overduePayments} overdue payment links`;
+        console.log(chalk.cyan('\u2551') + chalk.red(overLine).padEnd(62 + 10) + chalk.cyan('\u2551'));
       }
-    } else {
-      console.log(chalk.cyan('║') + '  No leads yet'.padEnd(62) + chalk.cyan('║'));
+      console.log(chalk.cyan('\u2560' + '\u2550'.repeat(62) + '\u2563'));
     }
 
-    console.log(chalk.cyan('╠══════════════════════════════════════════════════════════════╣'));
+    // Integrations
+    console.log(chalk.cyan('\u2551  ') + chalk.bold('INTEGRATIONS') + ' '.repeat(48) + chalk.cyan('\u2551'));
 
-    // Product Catalog
-    const activeProducts = (config.products || []).filter(p => p.active);
-    if (activeProducts.length > 0) {
-      console.log(chalk.cyan('╠══════════════════════════════════════════════════════════════╣'));
-      console.log(chalk.cyan('║  ') + chalk.bold('PRODUCTS') + ` (${activeProducts.length} active)`.padEnd(52) + chalk.cyan('║'));
-      for (const product of activeProducts.slice(0, 5)) {
-        const tiers = product.pricing.map(t => `$${t.price}`).join('/');
-        const line = `  ${product.name.padEnd(20)} ${tiers || 'Custom'}`;
-        console.log(chalk.cyan('║') + line.padEnd(62) + chalk.cyan('║'));
-      }
-      if (activeProducts.length > 5) {
-        const moreLine = `  ... and ${activeProducts.length - 5} more`;
-        console.log(chalk.cyan('║') + moreLine.padEnd(62) + chalk.cyan('║'));
-      }
-    }
+    const telegramStatus = config.telegram?.botToken ? '\u2705 Connected' : '\u274c Not configured';
+    console.log(chalk.cyan('\u2551') + `  Telegram:  ${telegramStatus}`.padEnd(62) + chalk.cyan('\u2551'));
 
-    console.log(chalk.cyan('╠══════════════════════════════════════════════════════════════╣'));
+    const razorpayStatus = config.razorpay?.keyId ? '\u2705 Connected' : '\u274c Not configured';
+    console.log(chalk.cyan('\u2551') + `  Razorpay:  ${razorpayStatus}`.padEnd(62) + chalk.cyan('\u2551'));
 
-    // Platforms & Integrations
-    console.log(chalk.cyan('║  ') + chalk.bold('PLATFORMS & INTEGRATIONS') + ' '.repeat(38) + chalk.cyan('║'));
-    for (const account of config.socialAccounts) {
-      const icon = account.enabled ? '✅' : '❌';
-      const line = `  ${icon} ${account.platform.padEnd(12)} ${account.handle ? `@${account.handle}` : ''} [${account.authMethod}]`;
-      console.log(chalk.cyan('║') + line.padEnd(62) + chalk.cyan('║'));
-    }
+    const whatsappStatus = config.whatsapp?.enabled ? '\u2705 Enabled' : '\u274c Disabled';
+    console.log(chalk.cyan('\u2551') + `  WhatsApp:  ${whatsappStatus}`.padEnd(62) + chalk.cyan('\u2551'));
 
-    // Notion status
-    const notionStatus = config.notion?.apiKey ? '✅ Connected' : '❌ Not configured';
-    const notionLine = `  Notion:    ${notionStatus}`;
-    console.log(chalk.cyan('║') + notionLine.padEnd(62) + chalk.cyan('║'));
-
-    // Telegram status
-    const telegramStatus = config.telegram?.botToken ? '✅ Connected' : '❌ Not configured';
-    const telegramLine = `  Telegram:  ${telegramStatus}`;
-    console.log(chalk.cyan('║') + telegramLine.padEnd(62) + chalk.cyan('║'));
-
-    // Company email
-    if (config.companyEmail?.address) {
-      const emailLine = `  Email:     ${config.companyEmail.address}`;
-      console.log(chalk.cyan('║') + emailLine.padEnd(62) + chalk.cyan('║'));
-    }
-
-    if (config.socialAccounts.length === 0 && !config.notion && !config.telegram) {
-      console.log(chalk.cyan('║') + '  No platforms configured'.padEnd(62) + chalk.cyan('║'));
-    }
-
-    console.log(chalk.cyan('╚══════════════════════════════════════════════════════════════╝'));
+    console.log(chalk.cyan('\u255a' + '\u2550'.repeat(62) + '\u255d'));
     console.log(chalk.dim('\n  Press Ctrl+C to exit. Refreshes every 5s.\n'));
   };
 
-  // Initial render
   render();
 
-  // Refresh loop
   const interval = setInterval(render, 5000);
 
   process.on('SIGINT', () => {
@@ -181,7 +169,6 @@ export async function dashboardCommand(): Promise<void> {
     process.exit(0);
   });
 
-  // Keep process alive
   await new Promise(() => {});
 }
 

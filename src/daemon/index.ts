@@ -2,9 +2,11 @@ import { fork } from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
 import net from 'node:net';
-import { paths, loadConfig, saveDaemonPid, clearDaemonPid, getDaemonPid } from '../config/index.js';
+import { paths, loadConfig, reloadConfig, saveDaemonPid, clearDaemonPid, getDaemonPid } from '../config/index.js';
 import { initializeDatabase, getSqlite, closeDb } from '../db/index.js';
 import { createAgents } from '../agents/index.js';
+import { startApiServer } from '../api/server.js';
+import { TelegramBotService } from '../services/telegram-bot.js';
 import { getLogger } from '../utils/logger.js';
 import cron from 'node-cron';
 
@@ -22,8 +24,6 @@ export function startDaemon(): { pid: number } | { error: string } {
     'worker.js'
   );
 
-  // We'll run the daemon in the current process for simplicity
-  // In production, this would fork a detached process
   const child = fork(daemonScript, [], {
     detached: true,
     stdio: 'ignore',
@@ -65,10 +65,10 @@ export async function runDaemon(): Promise<void> {
   const config = loadConfig();
   initializeDatabase();
 
+  // Schedule only 4 Revenue Execution OS agents
   const agentSchedules = createAgents(config);
   const cronJobs: cron.ScheduledTask[] = [];
 
-  // Schedule each agent
   for (const schedule of agentSchedules) {
     const job = cron.schedule(schedule.cronExpression, async () => {
       try {
@@ -81,6 +81,24 @@ export async function runDaemon(): Promise<void> {
     cronJobs.push(job);
     log.info({ agent: schedule.agent.name, interval: schedule.interval }, 'Agent scheduled');
   }
+
+  // Start Telegram bot polling service for approval callbacks
+  const telegramBot = new TelegramBotService(config);
+  telegramBot.start();
+
+  // Start API server
+  const apiServer = startApiServer(config);
+
+  // Config hot reload via fs.watchFile
+  fs.watchFile(paths.config, { interval: 5000 }, () => {
+    log.info('Config file changed, reloading...');
+    const newConfig = reloadConfig();
+    if (newConfig) {
+      log.info('Config reloaded successfully');
+    } else {
+      log.error('Failed to reload config — keeping existing config');
+    }
+  });
 
   // IPC socket for CLI communication
   const socketServer = net.createServer((socket) => {
@@ -103,22 +121,14 @@ export async function runDaemon(): Promise<void> {
     log.info({ socket: paths.socket }, 'IPC socket listening');
   });
 
-  // Run initial ticks for ops and CEO
+  // Run initial pipeline agent tick after 5s
   setTimeout(async () => {
-    const opsSchedule = agentSchedules.find(s => s.agent.name === 'ops');
-    if (opsSchedule) {
-      log.info('Running initial Ops tick');
-      await opsSchedule.agent.tick().catch(err => log.error({ err }, 'Initial ops tick failed'));
+    const pipelineSchedule = agentSchedules.find(s => s.agent.name === 'pipeline');
+    if (pipelineSchedule) {
+      log.info('Running initial Pipeline tick');
+      await pipelineSchedule.agent.tick().catch(err => log.error({ err }, 'Initial pipeline tick failed'));
     }
   }, 5000);
-
-  setTimeout(async () => {
-    const ceoSchedule = agentSchedules.find(s => s.agent.name === 'ceo');
-    if (ceoSchedule) {
-      log.info('Running initial CEO tick');
-      await ceoSchedule.agent.tick().catch(err => log.error({ err }, 'Initial CEO tick failed'));
-    }
-  }, 10000);
 
   // Graceful shutdown
   const shutdown = () => {
@@ -126,7 +136,10 @@ export async function runDaemon(): Promise<void> {
     for (const job of cronJobs) {
       job.stop();
     }
+    telegramBot.stop();
+    fs.unwatchFile(paths.config);
     socketServer.close();
+    if (apiServer) apiServer.close();
     closeDb();
     clearDaemonPid();
     process.exit(0);
@@ -141,7 +154,7 @@ export async function runDaemon(): Promise<void> {
     log.error({ err }, 'Unhandled rejection in daemon');
   });
 
-  log.info('Hivemind daemon running. All agents scheduled.');
+  log.info(`Hivemind daemon running. ${agentSchedules.length} agents scheduled. Telegram bot polling active.`);
 }
 
 function handleIPCMessage(msg: any, config: any): any {
@@ -159,11 +172,13 @@ function handleIPCMessage(msg: any, config: any): any {
 
 function getStatus(): any {
   const db = getSqlite();
-  const agents = ['ceo', 'content', 'social', 'sales', 'client', 'ops'];
+  const config = loadConfig();
+  const agentSchedules = createAgents(config);
+  const agentNames = agentSchedules.map(s => s.agent.name);
 
   return {
     uptime: process.uptime(),
-    agents: agents.map(agent => {
+    agents: agentNames.map(agent => {
       const lastRun = db.prepare(`
         SELECT status, completed_at, summary FROM agent_runs
         WHERE agent = ? ORDER BY id DESC LIMIT 1

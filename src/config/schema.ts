@@ -89,12 +89,51 @@ export const CompanyConfigSchema = z.object({
   }).optional(),
 });
 
+export const ApiConfigSchema = z.object({
+  port: z.number().default(9474),
+  enabled: z.boolean().default(false),
+  authToken: z.string().optional(),
+});
+
+export const CompetitorSchema = z.object({
+  name: z.string(),
+  website: z.string(),
+  category: z.string().optional(),
+});
+
+export const RazorpayConfigSchema = z.object({
+  keyId: z.string().default(''),
+  keySecret: z.string().default(''),
+  webhookSecret: z.string().default(''),
+}).default({});
+
+export const ApprovalsConfigSchema = z.object({
+  defaultExpiry: z.string().default('24h'),
+  autoApproveTypes: z.array(z.string()).default([]),
+}).default({});
+
+export const BriefingConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  time: z.string().default('09:00'),
+  channel: z.string().default('telegram'),
+}).default({});
+
+export const WhatsAppConfigSchema = z.object({
+  webhookVerifyToken: z.string().default(''),
+  enabled: z.boolean().default(false),
+}).default({});
+
+export const LegacyAgentsConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+}).default({});
+
 export const HivemindConfigSchema = z.object({
   version: z.string().default('0.1.0'),
   company: CompanyConfigSchema,
   socialAccounts: z.array(SocialAccountSchema).default([]),
   brand: BrandAssetsSchema.default({}),
   llm: LLMProviderSchema,
+  llmFallbacks: z.array(LLMProviderSchema).default([]),
   budget: BudgetSchema,
   products: z.array(ProductSchema).default([]),
   notion: NotionConfigSchema.optional(),
@@ -114,6 +153,17 @@ export const HivemindConfigSchema = z.object({
     port: z.number().default(9473),
     pidFile: z.string().default('hivemind.pid'),
   }).default({}),
+  api: ApiConfigSchema.default({}),
+  competitors: z.array(CompetitorSchema).default([]),
+  razorpay: RazorpayConfigSchema,
+  approvals: ApprovalsConfigSchema,
+  briefing: BriefingConfigSchema,
+  whatsapp: WhatsAppConfigSchema,
+  legacyAgents: LegacyAgentsConfigSchema,
+  serviceCategories: z.array(z.string()).default([
+    'web-development', 'mobile-app', 'design', 'marketing', 'consulting', 'custom',
+  ]),
+  defaultCurrency: z.string().default('INR'),
   createdAt: z.string().default(() => new Date().toISOString()),
   updatedAt: z.string().default(() => new Date().toISOString()),
 });
@@ -130,3 +180,10 @@ export type NotionConfig = z.infer<typeof NotionConfigSchema>;
 export type TelegramConfig = z.infer<typeof TelegramConfigSchema>;
 export type CompanyEmail = z.infer<typeof CompanyEmailSchema>;
 export type FounderContact = z.infer<typeof FounderContactSchema>;
+export type ApiConfig = z.infer<typeof ApiConfigSchema>;
+export type Competitor = z.infer<typeof CompetitorSchema>;
+export type RazorpayConfig = z.infer<typeof RazorpayConfigSchema>;
+export type ApprovalsConfig = z.infer<typeof ApprovalsConfigSchema>;
+export type BriefingConfig = z.infer<typeof BriefingConfigSchema>;
+export type WhatsAppConfig = z.infer<typeof WhatsAppConfigSchema>;
+export type LegacyAgentsConfig = z.infer<typeof LegacyAgentsConfigSchema>;
